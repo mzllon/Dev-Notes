@@ -238,7 +238,7 @@ compression = true
 no_compress_limit = 256
 ```
 
-![](./images/0424-00-any-link-server-toml.png)
+![](./images/0424-any-link-server-toml.png)
 
 ### 7. 生成docker-compose配置文件
 
@@ -279,7 +279,7 @@ services:
 
 然后用命令`docker-compose up -d && docker-compose logs -f`启动并查看日志。
 
-![](./images/0424-00-any-link-docker-compose-up.png)
+![](./images/0424-any-link-docker-compose-up.png)
 
 ## 8. 管理控制台
 
@@ -287,11 +287,11 @@ services:
 
 如果不小心忘记输入`https`，则页面浏览器显示`Client sent an HTTP request to an HTTPS server.`：
 
-![](./images/0424-00-any-link-web-console-http.png)
+![](./images/0424-any-link-web-console-http.png)
 
 如果你并没有更换证书，那么浏览器会提示`你的连接不是专用连接`，只需要点击**高级**按钮，然后点击**继续访问**即可。
 
-![](./images/0424-00-any-link-web-console-https.png)
+![](./images/0424-any-link-web-console-https.png)
 
 后台管理非常简单明了，只需要配置`用户组`和`用户`即可开始使用，其他按需定制即可。
 
@@ -317,7 +317,7 @@ services:
 
 点击左侧菜单列表的`用户组信息` → `用户组列表`，默认情况下如下：
 
-![](./images/0424-00-any-link-web-console-group-list.png)
+![](./images/0424-any-link-web-console-group-list.png)
 
 > 不用的用户组可以仅用或者删除，以免客户端显示太多。
 
@@ -333,7 +333,7 @@ services:
 
 `客户端DNS`按需改动，默认是`114.114.114.114`，我一般习惯改为`223.5.5.5`和`223.6.6.6`。
 
-![](./images/0424-00-any-link-web-console-group-add-general.png)
+![](./images/0424-any-link-web-console-group-add-general.png)
 
 ##### 8.3.1.2. 认证方式
 
@@ -343,7 +343,7 @@ services:
 
 `包含路由`如果添加内网网段，例如网段为`10.0.0.0/24`，则表示该组用户可以访问内网设备，而互联网请求依旧使用客户端本地的网络访问。
 
-![](./images/0424-00-any-link-web-console-group-add-route.png)
+![](./images/0424-any-link-web-console-group-add-route.png)
 
 ##### 8.3.1.4. 权限控制
 
@@ -357,7 +357,7 @@ services:
 
 点击左侧菜单列表的`用户信息` → `用户列表` → `添加`按钮。`PIN码`就是密码，如果不填写就是系统随机生成。`禁用OTP`默认是不开启的，建议开启这个功能，提高VPN的安全性。 `用户组`必须勾选一个，也可以勾选多个，但是客户端每次连接只能选择一个组。`发送邮件`的启用并生效的前提必须先配置邮箱服务器。
 
-![add user](./images/0424-00-any-link-client-profile-open.png)
+![add user](./images/0424-any-link-client-profile-open.png)
 
 ## 9. 客户端
 
@@ -369,15 +369,15 @@ services:
 
 ## 9.1. 新建Profile管理
 
-![](./images/0424-00-any-link-client-profile-open.png)
+![](./images/0424-any-link-client-profile-open.png)
 
 ## 9.2. 填写Profile管理信息
 
-![](./images/0424-00-any-link-client-profile-cfg.png)
+![](./images/0424-any-link-client-profile-cfg.png)
 
 点击保存是会有一个安全提示，你的密码将会被保存。
 
-![](./images/0424-00-any-link-client-profile-password-save.png)
+![](./images/0424-any-link-client-profile-password-save.png)
 
 点击`保存`按钮，保存成功后。
 
@@ -385,17 +385,17 @@ services:
 
 如果采用的证书是不可信的，客户端默认是终止连接的，可以在`设置`中取消勾选。
 
-![](./images/0424-00-any-link-client-settings-invalid-ssl.png)
+![](./images/0424-any-link-client-settings-invalid-ssl.png)
 
 ## 9.4. 连接
 
 如果启用了`OTP`，则需要输入`OTP`的临时密码，然后点击`连接`按钮。
 
-![](./images/0424-00-any-link-client-main.png)
+![](./images/0424-any-link-client-main.png)
 
 连接成功之后，默认会最小化成功，也可以在前面的设置中取消勾选`VPN连接成功后最小化当前窗口`。
 
-![](./images/0424-00-any-link-client-connected-success.png)
+![](./images/0424-any-link-client-connected-success.png)
 
 ## 参考
 
