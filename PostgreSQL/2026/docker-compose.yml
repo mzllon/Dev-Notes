@@ -1,0 +1,164 @@
+# =============================================================================
+# PostgreSQL 生产级单机部署(Docker Compose v2)
+# 完整说明与操作手册见同目录 README.md
+# =============================================================================
+
+name: pg-prod
+
+services:
+  db:
+    # ★ 锁定到具体小版本(编写时 18.x 最新为 18.6,2026-08 安全小版本)。
+    #   同一大版本内可直接换小版本号滚动升级;跨大版本(18→19)必须走迁移,见 README。
+    #   追求极致可复现可用 digest 锁定:docker images --digests 查看,写法 image: postgres:18.6@sha256:...
+    image: postgres:18.6
+    container_name: pg-prod-db
+    restart: unless-stopped
+    # 默认 SIGTERM = smart shutdown,会一直等所有客户端断开,等到超时被 SIGKILL。
+    # SIGINT = fast shutdown:断开连接 → checkpoint → 干净退出,生产停机用这个。
+    stop_signal: SIGINT
+    # 给 checkpoint 足够时间,超时才会 SIGKILL
+    stop_grace_period: 2m
+    # PostgreSQL 并行查询/锁等用 POSIX 共享内存,默认 64MB 会报 "could not resize shared memory"
+    shm_size: 1gb
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # 资源限额:本方案按 2 vCPU / 8GB 独占主机设计,默认不设 cgroup 限额
+    # (PG 自身通过 shared_buffers/work_mem 约束内存;限额过紧反而会被 OOM kill)。
+    # 若与其他服务混部,再打开限额并同步缩调 command 段参数:
+    # mem_limit: 6g
+    # cpus: 1.5
+    secrets:
+      - pg_password
+    environment:
+      # 18+ 镜像的数据目录布局:挂载点下按大版本分目录(便于未来大版本共用同一挂载点)
+      PGDATA: /var/lib/postgresql/18/docker
+      # ★ 以下变量只在数据目录为空的【首次启动】生效,之后改它们不影响已初始化的库
+      POSTGRES_DB: "${POSTGRES_DB:?请在 .env 中设置 POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER:?请在 .env 中设置 POSTGRES_USER}"
+      # 密码走 Docker secret 文件,不落明文环境变量
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+      # 开启数据页校验和,能尽早发现存储层静默损坏(仅首次 initdb 生效)
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      TZ: Asia/Shanghai
+    # ★ 绑定内网网卡 + 宿主 firewalld 白名单(部署实例已放行 192.168.10.0/24);
+    #   不要 0.0.0.0,严禁公网。更严格的 SSH 隧道/组网方案见 README「网络与访问控制」。
+    ports:
+      - "192.168.10.66:5432:5432"   # 换服务器部署时,改成那台机器的内网 IP
+    volumes:
+      # 18+ 镜像推荐挂载 /var/lib/postgresql;实际数据落在宿主机 ./data/18/docker
+      - ./data:/var/lib/postgresql
+      - ./init:/docker-entrypoint-initdb.d:ro    # 仅首次初始化执行,按文件名排序
+      - ./wal_archive:/wal_archive               # WAL 归档(PITR 灾难恢复用)
+      - ./backups:/backups                       # 逻辑备份 + 物理基备
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\" -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    # 容器日志(json-file)必须限大小,否则磁盘迟早被日志撑爆
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # 调优基线:2 vCPU / 8GB 内存独占主机(容量账与扩缩容见 README「容量规划与参数调优」)
+    command:
+      - postgres
+      # ---- 连接 ----
+      - -c
+      - max_connections=200          # 插槽上限;实际并发靠应用连接池压到 20–50,或加 PgBouncer
+      # ---- 并行(2 核收敛:防止单个查询吃满两个核,给 OLTP 留核)----
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_parallel_workers_per_gather=1
+      # ---- 内存 ----
+      - -c
+      - shared_buffers=2GB            # ~25% 内存
+      - -c
+      - effective_cache_size=6GB      # ~75% 内存,供优化器估算,不预分配
+      - -c
+      - work_mem=16MB                 # 每个排序/哈希节点可用,乘以并发,别盲目调大
+      - -c
+      - maintenance_work_mem=512MB    # VACUUM / CREATE INDEX
+      # ---- WAL / 检查点 ----
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - min_wal_size=1GB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_completion_target=0.9
+      # 防止孤立复制槽无限保留 WAL,把磁盘写满
+      - -c
+      - max_slot_wal_keep_size=2GB
+      # ---- 优化器(SSD 假设;机械盘 random_page_cost 用默认 4)----
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      # ---- WAL 归档:配合每日物理基备实现任意时间点恢复(PITR)----
+      - -c
+      - archive_mode=on
+      - -c
+      - "archive_command=test ! -f /wal_archive/%f && cp %p /wal_archive/%f"
+      - -c
+      - archive_timeout=300s          # 低写入量的库也能 5 分钟产出一个归档段
+      # ---- 可观测性 ----
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.max=10000
+      - -c
+      - pg_stat_statements.track=top
+      - -c
+      - log_checkpoints=on
+      - -c
+      - log_lock_waits=on
+      - -c
+      - log_min_duration_statement=1s  # 记录超过 1 秒的语句
+      - -c
+      - idle_in_transaction_session_timeout=15min  # 杀掉挂起事务,保护 autovacuum
+      - -c
+      - timezone=Asia/Shanghai
+
+  # 每日逻辑备份(pg_dump),本地轮转。注意:这只是备份体系的一半,
+  # 物理基备 + WAL 归档(PITR)见 scripts/base-backup.sh 与 README「备份体系」。
+  backup:
+    # ★ 大版本必须与 db 一致(用 18 系列客户端 dump 18 的库)
+    image: prodrigestivill/postgres-backup-local:18
+    container_name: pg-prod-backup
+    restart: unless-stopped
+    # 镜像官方建议:以 postgres 用户(uid 999,Debian 版)运行,配套把 backups 目录 chown 999:999
+    user: "999:999"
+    depends_on:
+      db:
+        condition: service_healthy
+    secrets:
+      - pg_password
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_DB: "${POSTGRES_DB:?请在 .env 中设置 POSTGRES_DB}"
+      POSTGRES_USER: "${POSTGRES_USER:?请在 .env 中设置 POSTGRES_USER}"
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+      SCHEDULE: "@daily"              # 每日 00:00(按下面的 TZ 计算);也支持标准 cron 表达式
+      BACKUP_ON_START: "TRUE"         # 每次启动先立即备份一次,便于验证备份链路
+      BACKUP_KEEP_DAYS: 7
+      BACKUP_KEEP_WEEKS: 4
+      BACKUP_KEEP_MONTHS: 6
+      TZ: Asia/Shanghai
+    volumes:
+      - ./backups:/backups
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password.txt

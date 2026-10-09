@@ -1,0 +1,4 @@
+# 真实凭据严禁入库:.env 为真实环境配置,secrets/ 下为密码文件
+.env
+secrets/*
+!secrets/README.md
