@@ -170,6 +170,98 @@ curl -sk "https://<桶>.b-prod-rustfs-s3.mored.tech/<对象key>" -o /dev/null -w
 curl -sk -X PUT --data-binary "x" "https://<桶>.b-prod-rustfs-s3.mored.tech/__t.txt" -o /dev/null -w "%{http_code}\n"
 ```
 
-> 应用侧密钥建议收窄为单桶数据读写(`s3:*` 连改 CORS、删桶都放行);子访问密钥天然登不了控制台(只认部署主密钥)。浏览器直传用预签名 URL(后端签,前端 PUT),SDK endpoint 用 `https://<桶>.b-prod-rustfs-s3.mored.tech`,region 填 `us-east-1`。
+> 应用侧密钥建议收窄为单桶数据读写(`s3:*` 连改 CORS、删桶都放行);子访问密钥天然登不了控制台(只认部署主密钥)——给人开后台账号要用 **IAM 用户**,见第 5 节。浏览器直传用预签名 URL(后端签,前端 PUT),SDK endpoint 用 `https://<桶>.b-prod-rustfs-s3.mored.tech`,region 填 `us-east-1`。
+
+## 5. 多用户管理(IAM):给同学开后台账号
+
+RustFS 内置完整 IAM(AWS IAM 策略语法)。身份类型先分清(v1.0.4 实测):
+
+| 身份 | 建立入口 | 典型用途 | 能否登控制台(9011) |
+|---|---|---|---|
+| root 凭证 | compose 里 `RUSTFS_ACCESS_KEY/SECRET_KEY` | 部署引导、日常管理 | 能,**绕过一切 IAM 检查**,绝不外发 |
+| **IAM 用户** | 控制台"策略"+"用户"页 | **给人**:各自登录看自己的桶 | **能**,且只看到被授权的桶 |
+| 子访问密钥(Service Account) | 控制台"访问密钥"页 | 给应用:派生密钥,继承父用户 | 不能 |
+
+内置策略(`readonly`/`readwrite`/`writeonly`/`consoleAdmin`/KMS 系列)都是**全资源**作用域,开桶级账号必须自定义策略。
+
+### 5.1 建策略(左侧"策略" → 新建策略)
+
+命名规范 `{ro|rw}-<桶名>`,一桶一策略,和桶同名最好找。
+
+单桶**只读**(浏览/预览/下载):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<桶名>"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": ["arn:aws:s3:::<桶名>/*"]
+    }
+  ]
+}
+```
+
+单桶**读写**(可上传/删对象,改不了桶配置——CORS、策略、生命周期都在桶级,天然挡住):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketLocation", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<桶名>"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": ["arn:aws:s3:::<桶名>/*"]
+    }
+  ]
+}
+```
+
+> **踩坑:不要加 `s3:ListAllMyBuckets`(v1.0.4 实测)**
+> 显式授权它(on `*`)后,`ListBuckets` 原样返回**全部 4 个桶**,服务端按 IAM 过滤直接失效。
+> 不授权时 `ListBuckets` 照样 200,内容自动收敛为"用户能 ListBucket/GetBucketLocation 的桶",控制台左侧桶列表正常工作。
+> 官方文档的"单桶只读"示例也刻意不含这条——别画蛇添足。
+
+### 5.2 建用户(左侧"用户" → 新增用户)
+
+1. 用户名(即 Access Key,如 `berich`;不能与 root 同名、不能带空格)
+2. 密码(即 Secret Key,≥8 位)
+3. "策略"下拉搜索并勾选 5.1 建的策略(可多选);"分组"可留空
+4. 提交,列表出现"已启用"即成
+
+同学登录:`http://192.168.10.66:9011/`,用户名+密码即 AK/SK。非 root 登录看不到再平衡/存储池退役等管理菜单,属正常。
+
+2026-11-09 实建:`rw-dev-rfs-berich` 策略 + `berich` 用户(读写 `dev-rfs-berich`),8 项 S3 API 验证全过。
+
+### 5.3 验证(aws cli,服务器上执行)
+
+```bash
+export AWS_ACCESS_KEY_ID=<用户名> AWS_SECRET_ACCESS_KEY=<密码>
+E="--endpoint-url http://127.0.0.1:9010"
+aws $E s3 ls                        # 只应列出授权的桶
+aws $E s3 ls s3://<桶>/             # 列对象 200
+aws $E s3 cp /tmp/t.txt s3://<桶>/__t.txt && aws $E s3 rm s3://<桶>/__t.txt   # 读写测
+aws $E s3 ls s3://<别人的桶>/       # 应 AccessDenied
+```
+
+只读账号第 3 条应失败(PutObject 403)。
+
+### 5.4 日常维护
+
+- 收回权限:用户页勾选 → "删除选中项";策略页改 JSON 即时生效(下次请求生效)
+- 人多同权限:"用户组"页建组、组绑策略、用户入组即继承,改一处全体生效
+- 密码重置:rc `admin user passwd`(或删了重建)
+- root 的 AK/SK 只做管理,发给同学的一律是 IAM 用户
 
 
