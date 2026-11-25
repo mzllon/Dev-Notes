@@ -155,13 +155,13 @@ python3 scripts/migrate_nexus2.py push \
 1. 冻结旧 Nexus 发包(CI 停 deploy,拉取不受影响)
 2. 三个仓库各跑一轮 --incremental 增量
 3. 第 6 节校验(数量 + checksum 抽查 + 真实拉取)
-4. 域名切换:maven.dev.i.mored.tech 的 Nginx 指向 kkRepo(见部署手册第 6 节,
-   含 /content/ 旧路径重写,存量 settings.xml 无需改动)
+4. 客户端切换:实际没有启用反代和域名切换,各处 settings.xml / distributionManagement
+   直接改成 http://192.168.10.66:19090/repository/<repo>/(部署手册第 6 节的反代方案仅为备选)
 5. 冒烟:mvn 拉包 + mvn deploy 一个测试版本(发包走 kkRepo)
 6. 观察期(建议 1~2 周)后下线旧 Nexus
 ```
 
-**回退**:域名指回旧 Nexus 即可——整个迁移过程对旧 Nexus 只读,它始终是完整可用的回退点。注意回退后旧 Nexus 上没有的,只有回退窗口内写到 kkRepo 的新包。
+**回退**:客户端配置改回旧 Nexus 地址即可——整个迁移过程对旧 Nexus 只读,它始终是完整可用的回退点。注意回退后旧 Nexus 上没有的,只有回退窗口内写到 kkRepo 的新包。
 
 ## 8. 常见问题
 

@@ -4,6 +4,7 @@
 
 - 部署形态:单机 Docker Compose,MySQL 8 + File blob 存储(生产可换 S3/OSS)
 - 迁移流程见 [kkrepo-nexus2-migration.md](./kkrepo-nexus2-migration.md)(内置迁移只支持 Nexus 3,Nexus 2 需走制品重发布路线)
+- 线上版本 `1.5.1`(2026-11-25 由 1.3.2 升级,Flyway V71),升级步骤见第 7 节;未使用反向代理,客户端直连 `http://192.168.10.66:19090`
 
 ## 1. 环境要求与规划
 
@@ -11,11 +12,12 @@
 | --- | --- | --- |
 | Docker / Compose | 24+ / v2 | `docker compose version` 确认 |
 | 机型 | ≥ 2C4G | 官方建议单实例 2C4G 起 |
-| 镜像 | `ghcr.io/klboke/kkrepo:1.3.2` | JVM 运行时;Native 版为 `1.3.2-native` |
-| 数据库 | 公司现有 MySQL 8 实例 | 官方默认后端;也支持 PostgreSQL 12+,两者为一等公民 |
+| 镜像 | `ghcr.io/klboke/kkrepo:1.5.1` | JVM 运行时;Native 版为 `1.5.1-native` |
+| 数据库 | `192.168.10.2:3306`(公司 MySQL 8.0.31) | 官方默认后端;也支持 PostgreSQL 12+,两者为一等公民 |
 | 应用端口 | 19090 → 8080 | 应用端口,见下方说明 |
 | 管理端口 | 19091 → 8081 | 管理端口,见下方说明 |
-| 目录 | `/data/kkrepo/` | compose 文件、.env、数据都在这 |
+| 主机 | `root@192.168.10.66`(mored-test-server-01,AlmaLinux 8.10) | 管理机免密登录 |
+| 目录 | `/mnt/old_data/kkrepo/` | compose 文件、.env、数据都在这 |
 
 > **两个端口各管什么**:
 >
@@ -31,7 +33,7 @@
 ## 2. docker-compose 部署
 
 ```bash
-mkdir -p /data/kkrepo && cd /data/kkrepo
+mkdir -p /mnt/old_data/kkrepo && cd /mnt/old_data/kkrepo
 ```
 
 `docker-compose.yml`(基于官方 `docker-compose.quickstart.yml` 精简,去掉了默认关闭的安全扫描服务):
@@ -40,7 +42,7 @@ mkdir -p /data/kkrepo && cd /data/kkrepo
 name: kkrepo
 
 services:
-  # JVM 镜像内用户是 999:999;若切 Native 镜像(KKREPO_IMAGE_TAG=1.3.2-native)改成 1002:1001
+  # JVM 镜像内用户是 999:999;若切 Native 镜像(KKREPO_IMAGE_TAG=1.5.1-native)改成 1002:1001
   app-data-perms:
     image: alpine:3.20
     user: root
@@ -50,7 +52,7 @@ services:
     network_mode: none
 
   kkrepo:
-    image: ghcr.io/klboke/kkrepo:${KKREPO_IMAGE_TAG:-1.3.2}
+    image: ghcr.io/klboke/kkrepo:${KKREPO_IMAGE_TAG:-1.5.1}
     depends_on:
       app-data-perms:
         condition: service_completed_successfully
@@ -64,7 +66,7 @@ services:
       KKREPO_API_KEY_PAYLOAD_SECRET: ${KKREPO_API_KEY_PAYLOAD_SECRET:?set in .env}
       KKREPO_FILE_BASE_DIR: /var/lib/kkrepo/blobs
       SERVER_TOMCAT_MAX_PART_COUNT: 200
-      # 反代场景:填 Nginx 所在出口 IP(同机部署填 127.0.0.1),让 X-Forwarded-* 被信任
+      # 仅反代场景用:填 Nginx 出口 IP 让 X-Forwarded-* 被信任;当前未用反代,保持默认即可
       KKREPO_TRUSTED_PROXIES: ${KKREPO_TRUSTED_PROXIES:-127.0.0.1}
       # 日志只写文件(Spring Boot 4 支持;写到 data 卷,默认 10MB/文件 + 7 天滚动)
       LOGGING_FILE_NAME: /var/lib/kkrepo/logs/kkrepo.log
@@ -107,15 +109,15 @@ networks:
 
 > `mored_network` 是已存在的外部网络,compose 不会创建它——启动前 `docker network ls | grep mored_network` 确认,没有就 `docker network create mored_network`。kkrepo 连公司 MySQL、proxy 仓库出网、kkrepo-health 探测 `http://kkrepo:8081`(容器间 DNS 要求同网络)都走它。若公司 MySQL 也是 `mored_network` 上的容器,`KKREPO_MYSQL_HOST` 直接填它的容器名;Nginx 若同样在该网络上,可 `proxy_pass http://kkrepo:8080` 免去本机端口映射的中间一跳。
 
-`.env`(两个 secret 一旦写入生产数据就不要再换,否则已加密数据无法解密):
+`.env`(两个 secret 一旦写入生产数据就不要再换,否则已加密数据无法解密;下面是首次生成的写法,线上实例的 `.env` 只在服务器上):
 
 ```bash
-cd /data/kkrepo
+cd /mnt/old_data/kkrepo
 cat > .env <<EOF
-KKREPO_IMAGE_TAG=1.3.2
-KKREPO_MYSQL_HOST=mysql.prod.internal
+KKREPO_IMAGE_TAG=1.5.1
+KKREPO_MYSQL_HOST=192.168.10.2
 KKREPO_MYSQL_PORT=3306
-KKREPO_MYSQL_USER=kkrepo
+KKREPO_MYSQL_USER=app_kkrepo
 KKREPO_MYSQL_PASSWORD=$(openssl rand -hex 16)
 KKREPO_CREDENTIAL_SECRET=$(openssl rand -hex 32)
 KKREPO_API_KEY_PAYLOAD_SECRET=$(openssl rand -hex 32)
@@ -133,7 +135,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES
 FLUSH PRIVILEGES;
 ```
 
-> **`REFERENCES` 不能省**:MySQL 8 起建外键强制检查该权限(5.7 只在文档里、不生效),而 kkRepo 的 schema 大量用外键(59 个 Flyway 迁移中 26 个建 FK),缺了会在首启建表时报 `ERROR 1142`。以上最小权限已覆盖全部需求:schema 无视图/触发器/存储过程/事件,无需相应权限。账号名 `app_kkrepo` 与 `.env` 的 `KKREPO_MYSQL_USER` 保持一致即可。
+> **`REFERENCES` 不能省**:MySQL 8 起建外键强制检查该权限(5.7 只在文档里、不生效),而 kkRepo 的 schema 大量用外键(71 个 Flyway 迁移中 31 个建 FK),缺了会在首启建表时报 `ERROR 1142`。以上最小权限已覆盖全部需求:schema 无视图/触发器/存储过程/事件,无需相应权限。账号名 `app_kkrepo` 与 `.env` 的 `KKREPO_MYSQL_USER` 保持一致即可。
 
 > `'kkrepo'@'%'` 按公司规范收窄来源网段更好;共享实例上确认磁盘余量与备份策略已覆盖新库。
 
@@ -171,11 +173,13 @@ curl -s http://127.0.0.1:19091/actuator/prometheus | head -3
 
 hosted(在 kkRepo 建 Maven hosted,数据由迁移脚本导入):
 
-| 仓库 ID | 版本策略 | 用途 |
-| --- | --- | --- |
-| `releases` | Release | 业务正式版 |
-| `snapshots` | Snapshot | 业务快照版 |
-| `thirdparty` | Release | 第三方私服 jar(Aspose 等) |
+| 仓库 ID | 版本策略 | 写策略 | 用途 |
+| --- | --- | --- | --- |
+| `releases` | Release | `ALLOW_ONCE` | 业务正式版;同版本不能覆盖重发,要重发先删旧版本 |
+| `snapshots` | Snapshot | `ALLOW` | 业务快照版 |
+| `thirdparty` | Release | `ALLOW` | 第三方私服 jar(Aspose 等) |
+
+> 三个仓库的布局策略都是 `PERMISSIVE`、`strictContentTypeValidation=false`(迁移容错)。`releases` 原为 `ALLOW`,迁移完成后于 2026-11-25 改为 `ALLOW_ONCE`。
 
 proxy(在 kkRepo 建 Maven proxy,remote URL 实测如下,无需迁数据):
 
@@ -191,17 +195,23 @@ proxy(在 kkRepo 建 Maven proxy,remote URL 实测如下,无需迁数据):
 
 group(在 kkRepo 建 Maven group,成员与旧 `public` 组一致):
 
-| 仓库 ID | 成员 |
+| 仓库 ID | 成员(按顺序) |
 | --- | --- |
-| `public` | tencentyun、huaweiyun、releases、snapshots、thirdparty、apache-snapshots、aliyun、central、douyin-openapi-repo、Spire-Maven-Mirror |
+| `public` | releases、snapshots、thirdparty、tencentyun、huaweiyun、apache-snapshots、aliyun、central、douyin-openapi-repo、Spire-Maven-Mirror |
 
-> group 成员有序,以上是旧 Nexus 的原始顺序。建议把 `releases/snapshots/thirdparty` 三个 hosted 提到最前,优先命中本地、少走远程。
+> group 成员有序。三个 hosted 已提到最前,优先命中本地、少走远程(与旧 Nexus 的原始顺序不同)。
 
-上传账号:给 CI/迁移脚本建一个专用 Local 用户,授予三个 hosted 仓库的写(deploy)权限,不要直接用 admin。
+迁移后新增的仓库(不在 Nexus 2 迁移范围内):
+
+| 仓库 ID | 格式 | 写策略 | 用途 |
+| --- | --- | --- | --- |
+| `npm-hosted` | npm hosted | `ALLOW_ONCE` | 公司内部 npm 包 |
+
+上传账号:CI 发包用专用 Local 用户 `deployment`(角色 `nx-deployment`,只有三个 hosted 仓库的写权限和 `public` 的读权限),不要直接用 admin。
 
 ## 5. Maven 客户端接入
 
-kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 是 `/content/repositories/...` 和 `/content/groups/public`,两者不兼容——靠第 6 节的 Nginx 重写做透明兼容,客户端可以不改;新配置建议直接用新路径。
+kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 是 `/content/repositories/...` 和 `/content/groups/public`,两者不兼容。当前未启用反向代理(第 6 节只是备选方案),客户端直接用 `http://192.168.10.66:19090/repository/<repo>/`;仍指向 `/content/...` 的旧配置会 404。
 
 `settings.xml`(拉包走 group):
 
@@ -210,7 +220,7 @@ kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 
   <mirror>
     <id>mored-maven</id>
     <mirrorOf>*</mirrorOf>
-    <url>http://maven.dev.i.mored.tech/repository/public/</url>
+    <url>http://192.168.10.66:19090/repository/public/</url>
   </mirror>
 </mirrors>
 
@@ -220,7 +230,7 @@ kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 
     <repositories>
       <repository>
         <id>mored-public</id>
-        <url>http://maven.dev.i.mored.tech/repository/public/</url>
+        <url>http://192.168.10.66:19090/repository/public/</url>
         <releases><enabled>true</enabled></releases>
         <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
       </repository>
@@ -236,11 +246,11 @@ kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 
 <distributionManagement>
   <repository>
     <id>mored-releases</id>
-    <url>http://maven.dev.i.mored.tech/repository/releases/</url>
+    <url>http://192.168.10.66:19090/repository/releases/</url>
   </repository>
   <snapshotRepository>
     <id>mored-snapshots</id>
-    <url>http://maven.dev.i.mored.tech/repository/snapshots/</url>
+    <url>http://192.168.10.66:19090/repository/snapshots/</url>
   </snapshotRepository>
 </distributionManagement>
 ```
@@ -249,8 +259,8 @@ kkRepo 的 URL 布局是 `/repository/<repo>/...`(Nexus 3 风格)。旧 Nexus 2 
 
 ```xml
 <servers>
-  <server><id>mored-releases</id><username>deploy</username><password>***</password></server>
-  <server><id>mored-snapshots</id><username>deploy</username><password>***</password></server>
+<server><id>mored-releases</id><username>deployment</username><password>***</password></server>
+<server><id>mored-snapshots</id><username>deployment</username><password>***</password></server>
 </servers>
 ```
 
@@ -267,9 +277,11 @@ mvn deploy:deploy-file -DgroupId=test -DartifactId=smoke -Dversion=0.0.1 -Dpacka
   -DrepositoryId=mored-releases
 ```
 
-## 6. Nginx 反向代理与域名切换
+## 6. Nginx 反向代理(备选,当前未启用)
 
-kkRepo 部署完成后,把 `maven.dev.i.mored.tech` 从旧 Nexus 切到 kkRepo(Nginx → 19090)。关键点:
+> 当前部署**没有**使用反向代理,客户端直连 `http://192.168.10.66:19090`。本节是当初为"域名切换 + `/content/` 旧路径兼容"准备的备选方案,留作参考。
+
+以后要启用时,把 `maven.dev.i.mored.tech` 指到 kkRepo(Nginx → 19090)。关键点:
 
 - `client_max_body_size 0`,大 jar 上传不受限;
 - 带全 `X-Forwarded-*` 头,否则生成的仓库 URL 会带内网 host/scheme;
@@ -320,24 +332,43 @@ curl -s -o /dev/null -w '%{http_code}\n' http://maven.dev.i.mored.tech/content/g
 
 ## 7. 运维
 
-**升级**:改 `.env` 里 `KKREPO_IMAGE_TAG` → `docker compose pull && docker compose up -d`。升级前备份数据库和 blob 目录;跨版本升级先看官方 CHANGELOG 的 Flyway 说明。
+**升级**(2026-11-25 按 1.3.2 → 1.5.1 实测,停机约 1 分钟):
 
-**备份**:
+1. **备份**(不设定时任务,升级前手动做)。blob 约 5.6G、6 万个文件,这块盘打包要 12 分钟左右,所以在线先备一遍,不放进停机窗口:
 
-```bash
-# 数据库(元数据、用户、权限、仓库定义):临时起一个 mysql 客户端容器连公司实例导出
-set -a; source /data/kkrepo/.env; set +a
-docker run --rm -e MYSQL_PWD="$KKREPO_MYSQL_PASSWORD" mysql:8.0 \
-  mysqldump -h "$KKREPO_MYSQL_HOST" -P "$KKREPO_MYSQL_PORT" -u "$KKREPO_MYSQL_USER" \
-  --single-transaction kkrepo | gzip > /backup/kkrepo-$(date +%F).sql.gz
+   ```bash
+   B=/data/backups/kkrepo-upgrade-<日期>-<旧版本>-to-<新版本>
+   mkdir -m 700 -p $B && cd /mnt/old_data/kkrepo
+   install -m 600 .env $B/env.before && install -m 644 docker-compose.yml $B/
+   # 数据库(元数据、用户、权限、仓库定义);宿主机自带 mysqldump,账号没有 PROCESS 权限,必须加 --no-tablespaces
+   MYSQL_PWD="$(sed -n 's/^KKREPO_MYSQL_PASSWORD=//p' .env)" \
+     mysqldump --single-transaction --quick --no-tablespaces --set-gtid-purged=OFF \
+     -h 192.168.10.2 -P 3306 -u app_kkrepo kkrepo | gzip > $B/kkrepo-pre.sql.gz
+   touch $B/.blob-marker
+   # blob(制品实体),不压缩,jar 本身已压缩;用 S3/OSS blob store 时备份对象桶即可
+   tar -C /mnt/old_data/kkrepo -cf $B/blobs-pre.tar data/blobs
+   ```
 
-# blob(制品实体);用 S3/OSS blob store 时备份对象桶即可
-tar -C /data/kkrepo -czf /backup/kkrepo-blobs-$(date +%F).tgz data/blobs
-```
+2. **拉镜像**:服务器直连 `ghcr.io` 能取清单,但下载镜像层只有约 27 KB/s,常见镜像站也都不可用,改在管理机(走代理)拉取后传上去:
+
+   ```bash
+   docker pull --platform linux/amd64 ghcr.io/klboke/kkrepo:<新版本>
+   docker save --platform linux/amd64 -o kkrepo-<新版本>.tar ghcr.io/klboke/kkrepo:<新版本>
+   scp kkrepo-<新版本>.tar root@192.168.10.66:$B/
+   # 服务器上载入,并核对镜像 ID 与官方 registry 的一致
+   docker load -i $B/kkrepo-<新版本>.tar
+   ```
+
+3. **切换**:`docker compose stop kkrepo` → 停服后再导一次库为 `kkrepo-final.sql.gz`(命令同上),并打包增量 `find data/blobs -type f -newer $B/.blob-marker -print0 | tar --null -C /mnt/old_data/kkrepo -cf $B/blobs-delta.tar --files-from=-` → 改 `.env` 的 `KKREPO_IMAGE_TAG`(两个 secret 不动)→ `docker compose up -d --wait`。
+4. **验证**:健康检查 UP;日志里 Flyway 迁移全部成功;拉一个存量制品、经 `public` 拉一个代理制品、`mvn deploy:deploy-file` 发一个测试包,测完删掉。
+5. **保留规则**:备份目录和旧版本镜像留到下一次升级,届时先做完新备份,再清理上一次的旧备份。
+6. **回滚**:还原 `kkrepo-final.sql.gz`、用 `env.before` 换回 `.env`、`docker compose up -d`。还原会丢掉升级后上传的制品,回滚要尽早决定。
+
+> **两个坑**:① 取 `.env` 里的值别用 `source`——变量一旦导出,`docker compose` 插值时环境变量优先于 `.env`,会解析出旧版本号;② 救急启动停掉的容器用 `docker start kkrepo-kkrepo-1`,`docker compose start kkrepo` 会因一次性依赖 `app-data-perms` 已退出而拒绝启动。
 
 **监控**:Prometheus 抓 `http://<host>:19091/actuator/prometheus`,官方提供 Grafana 面板(见仓库 `docs/zh/monitoring-observability-guide.md`)。
 
-**日志**:只写文件,不输出 console——compose 里 `LOGGING_FILE_NAME` 指定文件、`LOGGING_CONSOLE_ENABLED=false` 关闭 console(需要 Spring Boot 4,kkRepo 1.3.2 基于 4.1.1)。宿主机路径 `/data/kkrepo/data/logs/kkrepo.log`,默认 10MB/文件 + 保留 7 天滚动。`docker compose logs` 里只剩启动横幅和日志系统初始化前的极早期输出;若排查"还没写日志就挂了"的启动问题,临时把 `LOGGING_CONSOLE_ENABLED` 注释掉重启即可看到完整 console。
+**日志**:只写文件,不输出 console——compose 里 `LOGGING_FILE_NAME` 指定文件、`LOGGING_CONSOLE_ENABLED=false` 关闭 console(需要 Spring Boot 4,kkRepo 1.5.1 基于 4.1.2)。宿主机路径 `/mnt/old_data/kkrepo/data/logs/kkrepo.log`,默认 10MB/文件 + 保留 7 天滚动。`docker compose logs` 里只剩启动横幅和日志系统初始化前的极早期输出;若排查"还没写日志就挂了"的启动问题,临时把 `LOGGING_CONSOLE_ENABLED` 注释掉重启即可看到完整 console。
 
 ## 8. 常见问题
 
@@ -345,10 +376,11 @@ tar -C /data/kkrepo -czf /backup/kkrepo-blobs-$(date +%F).tgz data/blobs
 | --- | --- |
 | 忘记 admin 密码 | 无默认密码,首启 UI 创建(`Local/admin`)。恢复方法见下方"重置 admin 密码" |
 | 上传大 jar 报 413 | Nginx `client_max_body_size` 没放开,设为 `0` |
-| 页面/下载 URL 显示内网地址或 http/https 不对 | 反代头问题:确认 `X-Forwarded-*` 齐全、`KKREPO_TRUSTED_PROXIES` 覆盖代理出口 IP |
+| 使用反代后页面/下载 URL 显示内网地址或 http/https 不对 | 反代头问题:确认 `X-Forwarded-*` 齐全、`KKREPO_TRUSTED_PROXIES` 覆盖代理出口 IP |
 | `docker compose ps` 里 kkrepo 是 `running` 但整体不 healthy | 看 `kkrepo-health`:`healthy/unhealthy` 属于它;`docker compose logs kkrepo` 查应用日志 |
-| 数据库连不上 | kkrepo 镜像无 shell,在宿主机用临时客户端容器验证(连通信+认证一次测完):`set -a; source /data/kkrepo/.env; set +a; docker run --rm -e MYSQL_PWD="$KKREPO_MYSQL_PASSWORD" mysql:8.0 mysqladmin -h "$KKREPO_MYSQL_HOST" -P "$KKREPO_MYSQL_PORT" -u "$KKREPO_MYSQL_USER" ping`;报连不上是白名单/网络,报拒绝访问是账号授权 |
-| 旧客户端访问 `/content/repositories/...` 404 | 没做 Nginx 重写,或重写规则被其他 location 抢占 |
+| 数据库连不上 | 在宿主机用自带的 mysql 客户端验证(连通信+认证一次测完):`MYSQL_PWD="$(sed -n 's/^KKREPO_MYSQL_PASSWORD=//p' /mnt/old_data/kkrepo/.env)" mysqladmin -h 192.168.10.2 -P 3306 -u app_kkrepo ping`;报连不上是白名单/网络,报拒绝访问是账号授权 |
+| 客户端访问 `/content/repositories/...` 404 | 还在用 Nexus 2 的旧路径;当前未启用反代兼容,把 `settings.xml` / `distributionManagement` 改成 `/repository/<repo>/...` |
+| deploy 报 `Write policy ALLOW_ONCE forbids writing ...` | `releases` 同版本不能覆盖重发;确认版本号,或先删掉旧版本再发 |
 
 **重置 admin 密码**(无默认密码,首启 UI 创建;忘了按此恢复):有其他 admin 角色账号就先走 UI 用户管理;实在没有就直连 MySQL 改 hash——先生成 kkRepo 同格式(PBKDF2WithHmacSHA256,12 万次迭代)的新 hash:
 
